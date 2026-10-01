@@ -266,6 +266,57 @@ class OpenAIGenerator:
         return answer
 
 
+class GeminiGenerator:
+    def __init__(self, max_output_tokens: int = 400) -> None:
+        self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.model = os.getenv("GEMINI_MODEL", "gemma-4-26b-a4b-it").strip()
+        if not self.api_key:
+            raise RuntimeError("GEMINI_API_KEY is missing from .env")
+        if not self.model:
+            raise RuntimeError("GEMINI_MODEL is missing from .env")
+        self.max_output_tokens = max_output_tokens
+
+    def generate(self, prompt: str) -> str:
+        import urllib.request
+        import urllib.error
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": self.max_output_tokens,
+                "temperature": 0.0,
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    candidates = result.get("candidates", [])
+                    if not candidates:
+                        raise RuntimeError(f"Gemini API returned no candidates: {result}")
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    # Filter out internal reasoning parts (thought: True)
+                    actual_parts = [p.get("text", "") for p in parts if not p.get("thought")]
+                    if not actual_parts:
+                        actual_parts = [parts[-1].get("text", "")]
+                    answer = "".join(actual_parts).strip()
+                    if not answer:
+                        raise RuntimeError("Gemini returned an empty answer")
+                    return answer
+            except Exception as exc:
+                if attempt == 4:
+                    raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError("Gemini generation failed after retries")
+
+
 @dataclass(frozen=True)
 class DomainResponse:
     question: str
@@ -296,10 +347,17 @@ class DomainAssistant:
         top_k: int = 5,
     ) -> DomainAssistant:
         corpus_id, chunks = load_corpus(corpus_dir)
+        if generator is None:
+            if os.getenv("OPENAI_API_KEY", "").strip():
+                generator = OpenAIGenerator()
+            elif os.getenv("GEMINI_API_KEY", "").strip():
+                generator = GeminiGenerator()
+            else:
+                generator = OpenAIGenerator()
         return cls(
             corpus_id,
             BM25Retriever(chunks),
-            generator if generator is not None else OpenAIGenerator(),
+            generator,
             top_k,
         )
 
